@@ -1,92 +1,62 @@
-# **Real-Time Quant Analytics Application**
-1. ## Objective
+# Real-Time Quant Analytics Dashboard
+## Overview
 
-The objective of this project is to design and implement a small but complete analytical application that demonstrates the ability to work end-to-end, starting from real-time market data ingestion to quantitative analytics and interactive visualization.
+This project implements a real-time quantitative analytics application that demonstrates an end-to-end workflow starting from live market data ingestion to statistical analysis and interactive visualization. The system is designed as a lightweight research and analytics tool similar to those used by quantitative trading and research teams working on statistical arbitrage, market microstructure analysis, and pair-based strategies.
 
-The application consumes live tick data from Binance WebSocket streams, processes and samples this data into time-aligned series, computes key quantitative analytics commonly used in statistical arbitrage and market research, and presents the results through an interactive dashboard.
+The application connects to Binance WebSocket streams to receive live tick data, processes and aggregates this data into time-aligned series, computes multiple quantitative analytics, and exposes the results through an interactive dashboard with alerting and data export capabilities.
 
-The focus of this project is analytical reasoning, system design, and clarity of communication, rather than production-scale deployment.
+The emphasis of this project is on architectural clarity, analytical correctness, and extensibility, rather than production-scale throughput.
 
-2. ## Context
+## System Design Summary
 
-This application is designed as a helper analytics tool for traders and researchers at a quantitative trading firm operating across:
+At a high level, the system follows a layered architecture:
 
-Cash and derivatives markets
+A real-time ingestion layer consumes live tick data
 
-Statistical arbitrage strategies
+A buffering mechanism decouples ingestion from storage
 
-Risk premia harvesting
+A persistence layer stores raw ticks for historical access
 
-Market-making and micro-alpha research
+A resampling layer converts ticks into OHLCV bars
 
-The analytics implemented are representative of pair analysis and mean-reversion research workflows commonly used in such environments.
+An analytics layer computes statistical signals
 
-3. ## Workflow Overview
-3.1 ### Data Source
+A presentation layer visualizes analytics and handles user interaction
 
-Live tick data is streamed from Binance Futures WebSocket
+Although the application runs as a single local process, each layer is intentionally designed so that it can be extracted into an independent microservice in a production environment.
 
-Each tick contains:
+## Data Ingestion
 
-Timestamp
-Symbol
-Price
-Quantity (size)
+Market data is ingested from Binance using WebSocket connections. WebSockets were chosen over REST polling because market data is inherently event-driven and continuous. A push-based model ensures lower latency, avoids rate-limit issues, and prevents missed ticks during high activity periods.
 
-WebSockets were chosen instead of REST polling to ensure low-latency, event-driven ingestion, which is critical for real-time analytics.
+The ingestion logic runs asynchronously to ensure that data collection never blocks downstream analytics or the user interface.
 
-3.2 ### Data Handling & Storage
+## Buffering and Storage
 
-The data handling pipeline follows this sequence:
+Incoming ticks are first placed into an in-memory buffer before being written to disk. This design decision serves two purposes:
 
-Asynchronous WebSocket ingestion
+It decouples the ingestion rate from the database write rate
 
-In-memory buffering of ticks
+It prevents database I/O from becoming a bottleneck during bursty market conditions
 
-Batch persistence into a local SQLite database
+Ticks are periodically flushed in batches into a local SQLite database. SQLite was selected for its simplicity and zero-configuration setup, which is appropriate for a local analytical prototype.
 
-Resampling into selectable timeframes (1s, 1m)
+To handle concurrent reads and writes safely, SQLite is configured using Write-Ahead Logging (WAL) mode, and database writes are serialized using explicit locking. This approach reflects real-world constraints of embedded databases and demonstrates awareness of concurrency limitations.
 
-Design Rationale
+## Resampling and Time Alignment
 
-Writing each tick directly to the database would create an I/O bottleneck.
+Raw tick data is irregular and unsuitable for most statistical analyses. Therefore, ticks are resampled into fixed-interval OHLCV bars using Pandas.
 
-The in-memory buffer decouples ingestion speed from storage speed.
+The application supports multiple timeframes (such as 1-second and 1-minute bars). This step ensures that all downstream analytics operate on synchronized time series, which is critical for regression, correlation, and rolling window computations.
 
-SQLite was chosen for simplicity and zero-configuration local persistence.
+## Quantitative Analytics
 
-This design mirrors industry patterns such as Kafka → Database sinks, but in a simplified local form.
+The analytics layer is implemented as a set of pure, stateless functions that operate on resampled time series.
 
-3.3 ### Sampling & Resampling
+## Hedge Ratio (OLS Regression)
 
-Tick data is converted into OHLCV bars using Pandas resampling:
-
-Supported timeframes: 1s, 1m
-
-Open/High/Low/Close are computed from tick prices
-
-Volume is aggregated from trade quantities
-
-Resampling is a critical step because:
-
-Most statistical analytics require aligned time series
-
-Tick data is irregular and noisy
-
-4. ## Analytics Implemented
-
-The analytics layer is implemented as pure, stateless functions, separated from ingestion and visualization.
-
-4.1 ### Price Statistics
-
-Close prices extracted from resampled bars
-
-Used as inputs to all downstream analytics
-
-4.2 Hedge Ratio (OLS Regression)
-
-The hedge ratio is computed using Ordinary Least Squares (OLS) regression:
-
+An Ordinary Least Squares (OLS) regression is used to estimate the hedge ratio between two instruments. Given two aligned price series, A and B, the regression model is specified as:
+$$
 𝐴
 𝑡
 =
@@ -98,53 +68,15 @@ The hedge ratio is computed using Ordinary Least Squares (OLS) regression:
 +
 𝜖
 𝑡
-A
-t
-	​
+$$
 
-=α+βB
-t
-	​
+The hedge ratio (𝛽) represents the quantity of one asset required to hedge another and is a standard tool in pair-based analysis. OLS was chosen due to its interpretability and widespread acceptance in quantitative research.
 
-+ϵ
-t
-	​
+Spread Construction
 
-
-Where:
-
-𝐴
-𝑡
-A
-t
-	​
-
- and 
-𝐵
-𝑡
-B
-t
-	​
-
- are aligned close prices
-
-𝛽
-β represents the hedge ratio
-
-OLS was chosen because it is:
-
-Interpretable
-
-Industry-standard for pair relationships
-
-More appropriate than correlation for hedge estimation
-
-4.3 Spread
-
-The spread is computed as:
-
-Spread
-𝑡
+Using the estimated hedge ratio, the spread is constructed as:
+$$
+Spread𝑡
 =
 𝐴
 𝑡
@@ -152,243 +84,83 @@ Spread
 𝛽
 𝐵
 𝑡
-Spread
-t
-	​
+$$
 
-=A
-t
-	​
+The spread represents the residual relationship between the two assets and forms the basis for mean-reversion analysis.
 
-−βB
-t
-	​
+Rolling Z-Score
 
+A rolling z-score is computed on the spread to quantify deviations from its recent mean:
+$$
+ZScore𝑡 = \frac{Spread𝑡 - \mu𝑡}{\sigma𝑡}
+$$
+where 𝜇𝑡 and 𝜎𝑡 are the rolling mean and standard deviation of the spread over a specified window.
 
-The spread represents the residual relationship between the two assets and is a common input to mean-reversion strategies.
+Rolling windows are used to avoid lookahead bias and to allow statistics to adapt to changing market conditions. This signal is commonly used to identify overextended states in relative-value strategies.
 
-4.4 Rolling Z-Score
+Rolling Correlation
 
-A rolling z-score is computed on the spread:
+Rolling correlation between the two price series is computed to assess the stability of the relationship over time. This provides additional context for interpreting regression and spread behavior.
 
-𝑍
-𝑡
-=
-Spread
-𝑡
-−
-𝜇
-𝑡
-𝜎
-𝑡
-Z
-t
-	​
+Alerts
 
-=
-σ
-t
-	​
+The system includes a rule-based alert engine that evaluates analytics in near real time. Users can define thresholds (e.g., absolute z-score greater than a specified value), and alerts are triggered when these conditions are met.
 
-Spread
-t
-	​
+Alerts are deliberately separated from the analytics logic to maintain modularity. An alert history is maintained in the dashboard for transparency and traceability.
 
-−μ
-t
-	​
+## Visualization and User Interface
 
-	​
+The frontend is built using Streamlit and Plotly. Streamlit enables rapid development of an interactive dashboard entirely in Python, while Plotly provides rich, interactive charts with zoom, pan, and hover capabilities.
 
+The dashboard allows users to:
 
-Rolling windows are used to avoid lookahead bias
+Select instruments and timeframes
 
-This allows the statistics to adapt to changing market conditions
+Adjust rolling window parameters
 
-4.5 Rolling Correlation
+View live-updating charts for prices, spreads, and z-scores
 
-Rolling correlation between the two assets is computed to:
+Monitor alerts in real time
 
-Monitor pair stability
+Export processed analytics for offline analysis
 
-Validate regression assumptions over time
+The interface is designed to handle partial data availability gracefully, displaying warm-up states when insufficient data is available for rolling analytics.
 
-4.6 Alerts
+## Data Export
 
-The system supports user-defined rule-based alerts:
+Processed analytics can be exported as CSV files. The exported data includes aligned prices, spreads, and z-scores rather than raw tick data, reflecting typical research workflows. Export filenames dynamically reflect the selected instruments and timeframes.
 
-Alerts are triggered when |z-score| exceeds a configurable threshold
+## Challenges Encountered and Solutions
 
-Alerts are evaluated on live-updating analytics
+Several real-world issues were encountered during development:
 
-An alert history table is maintained in the dashboard
+Mixed timestamp formats from streaming data caused parsing errors. This was resolved by explicitly using ISO8601-compatible datetime parsing.
 
-5. Live Analytics Behavior
+Database locking issues arose due to concurrent reads and writes in SQLite. These were addressed using WAL mode, serialized writes, and careful separation of ingestion and UI access paths.
 
-Ingestion runs continuously in the background
+Rolling window initialization errors occurred when analytics were computed before sufficient data was available. Guard conditions and warm-up states were added to prevent runtime failures.
 
-Storage and resampling occur incrementally
+Async event loop conflicts with Streamlit were resolved by running ingestion in a dedicated background thread with its own asyncio loop.
 
-Analytics become available only after sufficient data is collected
+These challenges and their resolutions closely mirror issues encountered in real-time analytical systems.
 
-During warm-up periods, the UI displays informative messages instead of failing
+## Local Setup and Execution
 
-This reflects real-world trading systems where analytics must handle partial data availability gracefully.
+The application is designed for simple local execution. After creating and activating a Python virtual environment and installing dependencies, the entire system can be started with a single command:
 
-6. Frontend & Visualization
-
-The frontend is implemented using Streamlit with Plotly charts.
-
-Features:
-
-Interactive price charts
-
-Spread and z-score plots
-
-Zoom, pan, and hover support
-
-Sidebar controls for:
-
-Symbol selection
-
-Timeframe
-
-Rolling window
-
-Lookback period
-
-Alert thresholds
-
-CSV export of processed analytics
-
-Streamlit was chosen to enable rapid prototyping while keeping all logic in Python.
-
-7. Data Export
-
-Users can download a CSV file containing:
-
-Prices of both instruments
-
-Spread
-
-Z-score
-
-The exported data is:
-
-Time-aligned
-
-Derived from processed analytics (not raw ticks)
-
-Named dynamically based on symbols and timeframe
-
-8. Problems Faced & Solutions
-8.1 Mixed Timestamp Formats
-
-Problem:
-Streaming data produced timestamps with and without microseconds, causing Pandas parsing errors.
-
-Solution:
-Used pd.to_datetime(..., format="ISO8601") to robustly handle mixed formats.
-
-8.2 Database Write Bottleneck
-
-Problem:
-Writing each tick individually degraded performance.
-
-Solution:
-Introduced an in-memory buffer with periodic batch writes to the database.
-
-8.3 Rolling Window Initialization Errors
-
-Problem:
-Rolling analytics caused index errors when insufficient data was available.
-
-Solution:
-Added explicit warm-up handling and guarded all rolling computations.
-
-8.4 Async Event Loop Conflicts
-
-Problem:
-Async WebSocket ingestion conflicted with Streamlit’s execution model.
-
-Solution:
-Moved ingestion into a background thread with its own asyncio event loop.
-
-9. Architecture & Design Considerations
-
-The current implementation uses a layered monolithic architecture for simplicity, but each layer maps directly to a future microservice:
-
-Layer	Future Microservice
-Ingestion	Market Data Service
-Buffer	Kafka / Redis Streams
-Storage	Time-Series Database
-Analytics	Signal Engine
-Alerts	Rule Engine
-Frontend	Web Dashboard
-
-This ensures:
-
-Loose coupling
-
-Extensibility
-
-Minimal rework for scaling
-
-10. Setup Instructions (Local Execution)
-Step 1: Create Virtual Environment
-python -m venv venv
-source venv/bin/activate    # Windows: venv\Scripts\activate
-
-Step 2: Install Dependencies
-pip install -r requirements.txt
-
-Step 3: Run Application
 streamlit run app.py
 
 
-The application will automatically:
+On startup, the application automatically begins ingesting live market data and enables analytics as data becomes available.
 
-Start WebSocket ingestion
+## ChatGPT Usage 
 
-Persist data
+ChatGPT was used as a development aid for architectural reasoning, code structuring guidance, debugging assistance, and documentation refinement. All generated suggestions were manually reviewed, adapted, and tested. Final design decisions and validation were performed independently.
 
-Enable analytics as data becomes available
+## Scalability Considerations
 
-11. ChatGPT Usage Transparency
+While this implementation runs locally as a layered monolith, the architecture maps directly to a scalable microservice design. In a production setting, ingestion, analytics, alerts, and storage could be deployed as independent services connected via a streaming backbone such as Kafka, with a time-series database replacing SQLite.
 
-ChatGPT was used for:
+## Conclusion
 
-Architectural structuring
-
-Code organization guidance
-
-Debugging assistance
-
-Documentation drafting
-
-All generated suggestions were manually reviewed, adapted, and validated.
-Final design decisions, testing, and correctness checks were performed independently.
-
-12. Deliverables Included
-
-Runnable application (single-command execution)
-
-README.md (this document)
-
-Architecture diagram (.drawio + exported image)
-
-Modular and extensible codebase
-
-13. Conclusion
-
-This project demonstrates:
-
-End-to-end real-time analytics
-
-Correct quantitative methodology
-
-Thoughtful system design
-
-Clear trade-off reasoning
-
-It is intended as a prototype analytics stack that could evolve into a larger, production-grade system while maintaining clarity and simplicity.
+This project demonstrates the design and implementation of a complete real-time quantitative analytics pipeline. It balances simplicity with realism, emphasizing correct statistical methodology, modular system design, and clear communication. The resulting application serves as a functional prototype that could evolve into a larger analytics platform with minimal architectural changes.
